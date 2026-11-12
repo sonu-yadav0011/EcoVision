@@ -6,3 +6,8 @@ pillow
 matplotlib
 seaborn
 plotly
+
+rasterio
+pyproj
+geopandas
+shapely

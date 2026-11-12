@@ -1,224 +1,297 @@
-import os
+
+from pathlib import Path
 import zipfile
-import keras
+
 import numpy as np
-from PIL import Image, ImageDraw
+import pandas as pd
+import tensorflow as tf
 
-PATCH_SIZE = 160
-PACKED_MODEL_PATH = ".packed_resnet50v2.keras"
-FULL_CLASSIFIER_PATH = "eurosat_classifier.keras"
+from PIL import Image
+from tensorflow.keras.applications.resnet_v2 import preprocess_input
 
-EUROSAT_CLASSES = [
-    "AnnualCrop",
-    "Forest",
-    "HerbaceousVegetation",
-    "Highway",
-    "Industrial",
-    "Pasture",
-    "PermanentCrop",
-    "Residential",
-    "River",
-    "SeaLake",
-]
 
-# Map EuroSAT classes to Deforestation Risk Categories
-DEFORESTATION_CLASS_MAP = {
-    "Forest": "Intact Forest",
-    "HerbaceousVegetation": "Degraded / Jhum Regrowth",
-    "Pasture": "Degraded / Jhum Regrowth",
-    "AnnualCrop": "Deforested (Agricultural Clearing)",
-    "PermanentCrop": "Deforested (Plantation Clearing)",
-    "Residential": "Deforested (Settlement Encroachment)",
-    "Industrial": "Deforested (Industrial Clearing)",
-    "Highway": "Deforested (Linear Infrastructure)",
-    "River": "Water Body",
-    "SeaLake": "Water Body",
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = BASE_DIR / "models" / "res_net_model.keras"
+PACKED_MODEL = BASE_DIR / "models" / ".packed_resnet50v2.keras"
+
+CLASS_NAMES = {
+    0: "Intact Forest",
+    1: "Degraded / Jhum Scrub",
+    2: "Deforested / Cleared Land",
 }
 
+COLORS = {
+    0: (34, 139, 34),      # Green
+    1: (255, 193, 7),      # Yellow
+    2: (220, 53, 69),      # Red
+}
 
-def load_satellite_model(model_dir="res_net_model.keras"):
-  """Loads either a full 10-class EuroSAT model (if available) or
-
-  packs & loads the ResNet50V2 feature extractor folder.
-  """
-  if os.path.exists(FULL_CLASSIFIER_PATH):
-    model = keras.saving.load_model(FULL_CLASSIFIER_PATH)
-    return model, "classifier"
-
-  if os.path.isdir(model_dir):
-    if not os.path.exists(PACKED_MODEL_PATH):
-      with zipfile.ZipFile(PACKED_MODEL_PATH, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname in ["config.json", "metadata.json", "model.weights.h5"]:
-          fpath = os.path.join(model_dir, fname)
-          if os.path.exists(fpath):
-            zf.write(fpath, arcname=fname)
-    backbone = keras.saving.load_model(PACKED_MODEL_PATH)
-  else:
-    backbone = keras.saving.load_model(model_dir)
-
-  return backbone, "extractor"
+PATCH_SIZE = 160
 
 
-def _analyze_patch_spectral_and_embedding(patch_rgb: np.ndarray, emb: np.ndarray):
-  """Combines ResNet50V2 2048-D structural embedding statistics with RGB canopy
+# --------------------------------------------------
+# MODEL LOADING
+# --------------------------------------------------
 
-  indices (Excess Green Index & Canopy Density) for zero-shot scoring.
-  """
-  r = patch_rgb[:, :, 0].astype(np.float32) / 255.0
-  g = patch_rgb[:, :, 1].astype(np.float32) / 255.0
-  b = patch_rgb[:, :, 2].astype(np.float32) / 255.0
+def prepare_model_archive():
+    """Package an extracted Keras model directory for Keras 3."""
 
-  # Excess Green Index (ExG) & Green-Red Vegetation Ratio
-  exg = np.mean(2.0 * g - r - b)
-  canopy_ratio = np.mean((g > r * 1.03) & (g > b * 1.05))
+    if not MODEL_DIR.exists():
+        raise FileNotFoundError(
+            f"Model directory not found: {MODEL_DIR}"
+        )
 
-  # ResNet50V2 embedding texture complexity (dense canopy has distinct activation spread)
-  emb_norm = float(np.linalg.norm(emb))
-  emb_sparsity = float(np.mean(emb > 0.5))
+    if not (MODEL_DIR / "config.json").exists():
+        raise FileNotFoundError("Missing config.json")
 
-  # Composite Forest Integrity Score (0 to 100)
-  spectral_score = np.clip((exg + 0.15) / 0.45, 0.0, 1.0) * 65.0
-  canopy_score = np.clip(canopy_ratio, 0.0, 1.0) * 25.0
-  texture_score = np.clip(emb_sparsity * 2.5, 0.0, 1.0) * 10.0
+    if not (MODEL_DIR / "model.weights.h5").exists():
+        raise FileNotFoundError("Missing model.weights.h5")
 
-  forest_score = float(
-      np.clip(spectral_score + canopy_score + texture_score, 0, 100)
-  )
+    if not PACKED_MODEL.exists():
+        with zipfile.ZipFile(PACKED_MODEL, "w") as archive:
+            for file in MODEL_DIR.rglob("*"):
+                if file.is_file():
+                    archive.write(
+                        file,
+                        file.relative_to(MODEL_DIR)
+                    )
 
-  if forest_score >= 62.0:
-    status = "Intact Forest"
-    risk = "Low"
-  elif forest_score >= 38.0:
-    status = "Degraded / Jhum Scrub"
-    risk = "Moderate"
-  else:
-    status = "Deforested / Cleared Land"
-    risk = "High"
-
-  return {
-      "status": status,
-      "risk": risk,
-      "forest_score": round(forest_score, 1),
-      "canopy_pct": round(float(canopy_ratio * 100), 1),
-      "embedding_norm": round(emb_norm, 2),
-  }
+    return PACKED_MODEL
 
 
-def analyze_satellite_image(
-    pil_image: Image.Image, model, mode: str, area_sq_km: float = 25.0
-):
-  """Splits an image into 160x160 patches, runs ResNet50V2 inference on all patches,
+def load_feature_extractor():
+    """Load the existing ResNet50V2 feature extractor."""
 
-  and builds a deforestation risk overlay + regional metrics.
-  """
-  img = pil_image.convert("RGB")
-  orig_w, orig_h = img.size
+    archive = prepare_model_archive()
 
-  # Ensure image is at least 160x160 and snapped to multiples of 160
-  grid_cols = max(1, round(orig_w / PATCH_SIZE))
-  grid_rows = max(1, round(orig_h / PATCH_SIZE))
-  proc_w, proc_h = grid_cols * PATCH_SIZE, grid_rows * PATCH_SIZE
-  resized_img = img.resize((proc_w, proc_h), Image.Resampling.BILINEAR)
-  img_np = np.array(resized_img)
+    model = tf.keras.models.load_model(
+        archive,
+        compile=False,
+        safe_mode=True
+    )
 
-  patches = []
-  coords = []
-  for r_idx in range(grid_rows):
-    for c_idx in range(grid_cols):
-      y0, y1 = r_idx * PATCH_SIZE, (r_idx + 1) * PATCH_SIZE
-      x0, x1 = c_idx * PATCH_SIZE, (c_idx + 1) * PATCH_SIZE
-      patches.append(img_np[y0:y1, x0:x1])
-      coords.append((x0, y0, x1, y1, r_idx, c_idx))
+    if model.input_shape[1:] != (160, 160, 3):
+        raise ValueError(
+            f"Unexpected model input shape: {model.input_shape}"
+        )
 
-  batch = np.stack(patches, axis=0).astype(np.float32)
+    if model.output_shape[-1] != 2048:
+        raise ValueError(
+            f"Expected 2048 features, got {model.output_shape}"
+        )
 
-  if mode == "classifier":
-    preds = model.predict(batch, verbose=0)
-  else:
-    preprocessed = keras.applications.resnet_v2.preprocess_input(batch.copy())
-    embeddings = model.predict(preprocessed, verbose=0)
+    return model
 
-  overlay = resized_img.copy().convert("RGBA")
-  draw = ImageDraw.Draw(overlay, "RGBA")
 
-  patch_records = []
-  for i, (x0, y0, x1, y1, r_idx, c_idx) in enumerate(coords):
-    if mode == "classifier":
-      probs = preds[i]
-      top_idx = int(np.argmax(probs))
-      eurosat_label = EUROSAT_CLASSES[top_idx]
-      conf = float(probs[top_idx]) * 100.0
-      mapped = DEFORESTATION_CLASS_MAP[eurosat_label]
+# --------------------------------------------------
+# IMAGE PROCESSING
+# --------------------------------------------------
 
-      if mapped == "Intact Forest":
-        risk, status = "Low", f"Intact Forest ({conf:.0f}%)"
-      elif "Degraded" in mapped:
-        risk, status = "Moderate", f"{mapped} ({conf:.0f}%)"
-      elif mapped == "Water Body":
-        risk, status = "Water", f"Water Body ({conf:.0f}%)"
-      else:
-        risk, status = "High", f"{mapped} ({conf:.0f}%)"
+def load_image(image):
+    """Convert uploaded image or file path into RGB."""
 
-      record = {
-          "Tile": f"R{r_idx+1}-C{c_idx+1}",
-          "Classification": status,
-          "Risk Level": risk,
-          "Canopy Score": round(
-              float(probs[EUROSAT_CLASSES.index("Forest")]) * 100, 1
-          ),
-          "ResNet Feature Norm": round(float(np.linalg.norm(probs)), 2),
-      }
+    if isinstance(image, (str, Path)):
+        image = Image.open(image)
+
+    if not isinstance(image, Image.Image):
+        raise TypeError("Input must be a PIL image or file path.")
+
+    return image.convert("RGB")
+
+
+def extract_patches(image, patch_size=PATCH_SIZE):
+    """Split image into non-overlapping patches."""
+
+    image = load_image(image)
+
+    width, height = image.size
+
+    patches = []
+    coordinates = []
+
+    for y in range(0, height - patch_size + 1, patch_size):
+        for x in range(0, width - patch_size + 1, patch_size):
+
+            patch = image.crop(
+                (x, y, x + patch_size, y + patch_size)
+            )
+
+            patches.append(np.asarray(patch))
+            coordinates.append((x, y))
+
+    return patches, coordinates
+
+
+# --------------------------------------------------
+# VEGETATION INDICES
+# --------------------------------------------------
+
+def calculate_indices(patch):
+    """Calculate RGB-based vegetation screening features."""
+
+    image = np.asarray(patch, dtype=np.float32) / 255.0
+
+    red = image[:, :, 0]
+    green = image[:, :, 1]
+    blue = image[:, :, 2]
+
+    exg = 2 * green - red - blue
+
+    # Normalized excess green score, for visualization only.
+    exg_score = np.clip((exg.mean() + 1.0) / 3.0, 0, 1)
+
+    brightness = (red + green + blue) / 3.0
+
+    canopy_ratio = np.mean(
+        (green > red * 1.05) &
+        (green > blue * 1.05) &
+        (brightness > 0.12)
+    )
+
+    return float(exg_score), float(canopy_ratio)
+
+
+# --------------------------------------------------
+# HEURISTIC RISK SCORING
+# --------------------------------------------------
+
+def calculate_risk(exg_score, canopy_ratio):
+    """
+    Prototype heuristic classification.
+
+    These thresholds are illustrative and must be calibrated
+    using labelled imagery before real-world deployment.
+    """
+
+    vegetation_score = (
+        0.45 * exg_score +
+        0.55 * canopy_ratio
+    )
+
+    risk_score = 1.0 - vegetation_score
+
+    if vegetation_score >= 0.60:
+        category = 0
+    elif vegetation_score >= 0.35:
+        category = 1
     else:
-      info = _analyze_patch_spectral_and_embedding(patches[i], embeddings[i])
-      risk = info["risk"]
-      record = {
-          "Tile": f"R{r_idx+1}-C{c_idx+1}",
-          "Classification": info["status"],
-          "Risk Level": risk,
-          "Canopy Score": info["forest_score"],
-          "ResNet Feature Norm": info["embedding_norm"],
-      }
+        category = 2
 
-    patch_records.append(record)
+    return float(risk_score), category
 
-    # Color-code overlay tile
-    if risk == "High":
-      fill_color = (220, 38, 38, 95)  # Red alert
-      outline_color = (239, 68, 68, 220)
-    elif risk == "Moderate":
-      fill_color = (245, 158, 11, 80)  # Amber warning
-      outline_color = (251, 191, 36, 200)
-    elif risk == "Water":
-      fill_color = (59, 130, 246, 70)  # Blue water
-      outline_color = (96, 165, 250, 180)
-    else:
-      fill_color = (16, 185, 129, 45)  # Green intact
-      outline_color = (52, 211, 153, 160)
 
-    draw.rectangle([x0, y0, x1, y1], fill=fill_color, outline=outline_color, width=2)
+# --------------------------------------------------
+# AI FEATURE EXTRACTION
+# --------------------------------------------------
 
-  total_tiles = len(patch_records)
-  high_risk = sum(1 for p in patch_records if p["Risk Level"] == "High")
-  mod_risk = sum(1 for p in patch_records if p["Risk Level"] == "Moderate")
-  intact = sum(1 for p in patch_records if p["Risk Level"] == "Low")
+def extract_embeddings(model, patches, batch_size=32):
+    """Extract 2048-dimensional ResNet embeddings."""
 
-  deforested_pct = round((high_risk / total_tiles) * 100, 1)
-  degraded_pct = round((mod_risk / total_tiles) * 100, 1)
-  intact_pct = round((intact / total_tiles) * 100, 1)
+    if not patches:
+        return np.empty((0, 2048), dtype=np.float32)
 
-  # Estimate cleared area & CO2 loss (~18,500 tonnes CO2 per sq. km of NE subtropical forest)
-  cleared_sq_km = round((deforested_pct / 100.0) * area_sq_km, 2)
-  est_co2_loss_tonnes = int(cleared_sq_km * 18500)
+    images = np.asarray(patches, dtype=np.float32)
+    images = preprocess_input(images)
 
-  summary = {
-      "total_tiles": total_tiles,
-      "grid_shape": f"{grid_rows} × {grid_cols}",
-      "intact_pct": intact_pct,
-      "degraded_pct": degraded_pct,
-      "deforested_pct": deforested_pct,
-      "cleared_sq_km": cleared_sq_km,
-      "est_co2_loss_tonnes": est_co2_loss_tonnes,
-      "model_mode": mode,
-  }
+    embeddings = model.predict(
+        images,
+        batch_size=batch_size,
+        verbose=0
+    )
 
-  return overlay.convert("RGB"), summary, patch_records
+    return embeddings
+
+
+# --------------------------------------------------
+# RISK OVERLAY
+# --------------------------------------------------
+
+def create_risk_overlay(image, results, coordinates):
+    """Paint each analyzed patch according to its risk category."""
+
+    image = load_image(image)
+    overlay = np.asarray(image).copy()
+
+    for result, (x, y) in zip(results, coordinates):
+
+        category_id = result["category_id"]
+        color = COLORS[category_id]
+
+        overlay[
+            y:y + PATCH_SIZE,
+            x:x + PATCH_SIZE
+        ] = color
+
+    overlay_image = Image.fromarray(overlay)
+
+    return Image.blend(
+        image,
+        overlay_image,
+        alpha=0.35
+    )
+
+# --------------------------------------------------
+# COMPLETE ANALYSIS PIPELINE
+# --------------------------------------------------
+
+def analyze_image(image, model):
+    """Run the complete satellite image screening pipeline."""
+
+    image = load_image(image)
+
+    patches, coordinates = extract_patches(image)
+
+    if not patches:
+        raise ValueError(
+            "Image must be at least 160 × 160 pixels."
+        )
+
+    embeddings = extract_embeddings(model, patches)
+
+    results = []
+
+    for index, (patch, embedding, coordinate) in enumerate(
+        zip(patches, embeddings, coordinates)
+    ):
+
+        exg, canopy = calculate_indices(patch)
+
+        risk_score, category = calculate_risk(
+            exg,
+            canopy
+        )
+
+        results.append({
+            "tile_id": index + 1,
+            "x": coordinate[0],
+            "y": coordinate[1],
+            "exg_score": exg,
+            "canopy_ratio": canopy,
+            "risk_score": risk_score,
+            "category_id": category,
+            "category": CLASS_NAMES[category],
+            "embedding_norm": float(
+                np.linalg.norm(embedding)
+            ),
+        })
+
+    report = pd.DataFrame(results)
+
+    overlay = create_risk_overlay(
+        image,
+        results,
+        coordinates
+    )
+
+    return {
+        "report": report,
+        "overlay": overlay,
+        "embeddings": embeddings,
+        "total_tiles": len(results),
+        "image_width": image.width,
+        "image_height": image.height,
+    }
