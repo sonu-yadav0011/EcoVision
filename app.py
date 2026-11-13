@@ -32,10 +32,30 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+        @import url('https://db.onlinewebfonts.com/c/03a9d7f1923574b7a883f52caca97d83?family=Gabriel+Sans-Trial');
+        @import url('https://db.onlinewebfonts.com/c/8842729d0daa8a17c84c93e014db8606?family=Gabriel-Sans-Bold');
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 
-        html, body, [class*="css"] {
-            font-family: 'DM Sans', sans-serif;
+        @font-face {
+            font-family: 'Gabriel Sans';
+            font-style: normal;
+            font-weight: 400;
+            font-display: swap;
+            src: local('Gabriel Sans'), local('Gabriel-Sans'), local('GabrielSans-Regular'),
+                 url('https://db.onlinewebfonts.com/t/03a9d7f1923574b7a883f52caca97d83.woff2') format('woff2');
+        }
+
+        @font-face {
+            font-family: 'Gabriel Sans';
+            font-style: normal;
+            font-weight: 700;
+            font-display: swap;
+            src: local('Gabriel Sans Bold'), local('Gabriel-Sans-Bold'),
+                 url('https://db.onlinewebfonts.com/t/8842729d0daa8a17c84c93e014db8606.woff2') format('woff2');
+        }
+
+        html, body, [class*="css"], .stApp {
+            font-family: 'Gabriel Sans', 'Gabriel-Sans', 'Gabriel Sans-Trial', 'DM Sans', sans-serif !important;
         }
         .stApp {
             background:
@@ -43,8 +63,8 @@ st.markdown(
                 #0b1210;
             color: #edf5ef;
         }
-        h1, h2, h3 {
-            font-family: 'Space Grotesk', sans-serif !important;
+        h1, h2, h3, h4, h5, h6 {
+            font-family: 'Gabriel Sans', 'Gabriel-Sans', 'Gabriel Sans-Trial', 'Space Grotesk', sans-serif !important;
         }
         .hero {
             padding: 1.4rem 1.6rem;
@@ -83,7 +103,7 @@ st.markdown(
         }
         .metric-value {
             color: #f2fff4;
-            font-family: 'Space Grotesk', sans-serif;
+            font-family: 'Gabriel Sans', 'Gabriel-Sans', 'Space Grotesk', sans-serif;
             font-size: 1.65rem;
             font-weight: 700;
             margin-top: .25rem;

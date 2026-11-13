@@ -92,7 +92,7 @@ export default function Dashboard(){
       .map-layer-toggle button.active{background:#285b40;color:#fff}
       .district-detail{margin-top:2px}
       .district-detail-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:16px}
-      .district-detail-head h3{font:750 17px Manrope;margin:5px 0;color:#23382b}
+      .district-detail-head h3{font:750 17px var(--font-family, 'Gabriel Sans', sans-serif);margin:5px 0;color:#23382b}
       .district-detail-head p{font-size:11px;color:#77867b;margin:0}
       .district-chip{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;background:#edf5ed;color:#47714f;border-radius:20px;font-size:10px;font-weight:700;white-space:nowrap}
       .forest-stat-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}.forest-stat-strip>div{background:#eff6ef;border:1px solid #e1ece0;border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:5px}.forest-stat-strip small,.forest-class small{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:#728176;font-weight:700}.forest-stat-strip strong{font-size:20px;color:#285b40}.forest-stat-strip .negative{color:#b65a4e}.forest-stat-strip .positive{color:#397b52}.forest-class-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.forest-class{padding:12px;border:1px solid #e8eee6;border-radius:9px;display:flex;flex-direction:column;gap:7px}.forest-class strong{font-size:13px;color:#314d39}.forest-method-note{font-size:10px;color:#7b887e;line-height:1.5;margin-top:12px}.district-detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
